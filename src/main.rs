@@ -90,7 +90,7 @@ async fn index(
 
     // Download specified test file
     download_file(
-        &client,
+        client,
         &cfg.bucket_name,
         task.s3_key_test_file,
         test_file_path.to_str().unwrap(),
@@ -99,7 +99,7 @@ async fn index(
     .unwrap();
 
     // List all the files in the project
-    let files = list_files(&client, &cfg.bucket_name, task.s3_key_project_file)
+    let files = list_files(client, &cfg.bucket_name, task.s3_key_project_file)
         .await
         .unwrap();
 
@@ -113,9 +113,9 @@ async fn index(
     // Download each of the files into the projects directory
     for file in &files {
         download_file(
-            &client,
+            client,
             &cfg.bucket_name,
-            &file,
+            file,
             project_directory.join(file).to_str().unwrap(),
         )
         .await
@@ -160,7 +160,7 @@ async fn index(
         let output_directory = output_directory.clone();
         let test_file_path = test_file_path.clone();
         let handle = spawn_blocking(move || {
-            let student_details: Vec<&str> = student_info.split("_").collect();
+            let student_details: Vec<&str> = student_info.split('_').collect();
             let sid = student_details[0];
             let first_name = student_details[1];
             let last_name = student_details[2];
@@ -226,7 +226,7 @@ async fn index(
 
             // Add the org.example package to the file
             prepend_to_file(
-                &temp_dir
+                temp_dir
                     .join(format!("src/main/java/org/example/{project_name}.java"))
                     .to_str()
                     .unwrap(),
@@ -254,10 +254,10 @@ async fn index(
             std::fs::remove_dir_all(&temp_dir).unwrap();
 
             Row {
-                test_result: if test_result == "" {
-                    format!("Passed {passed_tests} / {total_tests} tests").to_owned()
+                test_result: if test_result.is_empty() {
+                    format!("Passed {passed_tests} / {total_tests} tests")
                 } else {
-                    test_result.to_owned()
+                    test_result
                 },
                 student_id: sid.to_owned(),
                 student_name: format!("{} {}", first_name.to_owned(), last_name.to_owned()),

@@ -25,7 +25,7 @@ pub async fn download_file(
 
     let mut file = File::create(out_file).unwrap();
     while let Some(bytes) = stream.try_next().await.unwrap() {
-        file.write(&bytes).unwrap();
+        file.write_all(&bytes).unwrap();
     }
 
     Ok(())
