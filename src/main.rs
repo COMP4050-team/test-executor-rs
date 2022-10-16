@@ -1,16 +1,28 @@
+mod junit_xml;
+mod s3;
+
 #[macro_use]
 extern crate rocket;
 
+use crate::junit_xml::TestSuite;
 use aws_sdk_s3::{types::ByteStream, Client, Region};
 use rocket::{
-    futures::{FutureExt, TryStreamExt},
+    futures::FutureExt,
     serde::{
         json::{serde_json, Json},
         Deserialize, Serialize,
     },
     State,
 };
-use std::{collections::HashSet, fs::File, io::Write};
+use s3::{download_file, list_files};
+use serde_xml_rs::from_str;
+use std::{
+    collections::HashSet,
+    env::temp_dir,
+    fs::File,
+    io::{Read, Write},
+};
+use tempfile::{tempdir, tempdir_in, TempDir};
 use tokio::task::spawn_blocking;
 
 struct AppConfig {
@@ -37,67 +49,31 @@ struct TestResult {
 #[serde(crate = "rocket::serde")]
 struct Row {
     #[serde(rename = "Test")]
-    test: String,
+    test_result: String,
     #[serde(rename = "SID")]
-    sid: String,
+    student_id: String,
     #[serde(rename = "Name")]
-    name: String,
+    student_name: String,
 }
 
-async fn download_file(
-    client: &Client,
-    bucket: &str,
-    s3_key: &str,
-    out_file: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Download test file
-    let resp = client.get_object().bucket(bucket).key(s3_key).send().await;
+fn prepend_to_file(file: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let mut f = File::open(file).unwrap();
+    let mut contents = String::new();
+    f.read_to_string(&mut contents).unwrap();
 
-    if let Err(e) = resp {
-        println!("Error: {:?}", e);
-        return Err("Error getting file from S3".into());
-    }
-
-    let stream = &mut resp.unwrap().body;
-
-    let path = std::path::Path::new(out_file);
-    let prefix = path.parent().unwrap();
-    std::fs::create_dir_all(prefix).unwrap();
-
-    let mut file = File::create(out_file).unwrap();
-    while let Some(bytes) = stream.try_next().await.unwrap() {
-        file.write(&bytes).unwrap();
-    }
+    let mut f = File::create(file).unwrap();
+    f.write_all(prefix.as_bytes()).unwrap();
+    f.write_all(contents.as_bytes()).unwrap();
 
     Ok(())
 }
 
-async fn list_files<'a>(
-    client: &'a Client,
-    bucket: &str,
-    prefix: &str,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let resp = client
-        .list_objects_v2()
-        .bucket(bucket)
-        .prefix(prefix)
-        .send()
-        .await;
-
-    if let Err(e) = resp {
-        println!("Error: {:?}", e);
-        return Err("Error listing files from S3".into());
-    }
-
-    let files = resp
-        .unwrap()
-        .contents
-        .unwrap()
-        .iter_mut()
-        .map(|f| f.key.as_ref().unwrap().to_owned())
-        .collect();
-
-    Ok(files)
+fn run_tests_with_gradle(project_path: &str) {
+    std::process::Command::new("./gradlew")
+        .arg("test")
+        .current_dir(project_path)
+        .output()
+        .expect("failed to execute process");
 }
 
 #[post("/", data = "<task>")]
@@ -106,15 +82,15 @@ async fn index(
     client: &State<Client>,
     task: Json<Task<'_>>,
 ) -> &'static str {
-    // Download test file
+    // Download specified test file
     download_file(
         &client,
         &cfg.bucket_name,
         task.s3_key_test_file,
         "/tmp/tests/Test.java",
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // List all the files in the project
     let files = list_files(&client, &cfg.bucket_name, task.s3_key_project_file)
@@ -136,8 +112,8 @@ async fn index(
             &file,
             &format!("/tmp/projects/{}", file),
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
     }
 
     // Get the project paths
@@ -153,12 +129,10 @@ async fn index(
         println!("{} ", path);
     }
 
-    // Create a map of project name to boolean
-    // let mut result: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     let mut result: TestResult = TestResult { rows: vec![] };
 
-    // Run processing-java on each of the project paths
-    let tasks = project_paths
+    // Run processing-java on each of the project paths as well as the tests using gradle
+    let tasks: Vec<_> = project_paths
         .iter()
         .map(|path| {
             let path = path.to_owned();
@@ -170,8 +144,23 @@ async fn index(
                 .to_str()
                 .unwrap()
                 .to_owned();
+            let project_name = std::path::Path::new(&path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
 
             spawn_blocking(move || {
+                let student_details: Vec<&str> = student_info.split("_").collect();
+                let sid = student_details[0];
+                let first_name = student_details[1];
+                let last_name = student_details[2];
+
+                let temp_dir = tempdir_in("/Users/jb/Desktop/test").unwrap().path().join(sid);
+                std::fs::create_dir_all(&temp_dir).unwrap();
+
+                // Run processing-java
                 let output = std::process::Command::new("processing-java")
                     .arg("--force")
                     .arg(format!("--sketch=/tmp/projects/{path}"))
@@ -180,24 +169,79 @@ async fn index(
                     .output()
                     .expect("failed to execute process");
 
-                let student_details: Vec<&str> = student_info.split("_").collect();
+                let mut test_result = String::default();
+
+                if !output.status.success() {
+                    test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+                }
+
+                // Copy the java project template for this project
+                std::process::Command::new("cp")
+                    .arg("-r")
+                    .arg("src/templates/testing-project/")
+                    .arg(&temp_dir)
+                    .output()
+                    .expect("failed to copy testing project");
+
+
+                println!(
+                    "Copying /tmp/tests/Test.java to {}/src/main/java/org/example/Test.java", temp_dir.to_str().unwrap()
+                );
+
+                // Move the downloaded test file at /tmp/tests/Test.java to {temp_dir}/src/test/java/org/example/Test.java
+                std::fs::copy(
+                    "/tmp/tests/Test.java",
+                    &temp_dir.join("src/test/java/org/example/Test.java"),
+                )
+                .unwrap();
+
+                println!(
+                    "Copying /tmp/output/{path}/source/{project_name}.java to {}/src/main/java/org/example/{project_name}.java", temp_dir.to_str().unwrap()
+                );
+
+                // Move the compiled {project_name}.java to {temp_dir}/src/main/java/org/example/{project_name}.java
+                std::fs::copy(
+                    format!("/tmp/output/{path}/source/{project_name}.java"),
+                    &temp_dir.join(format!(
+                        "src/main/java/org/example/{project_name}.java"
+                    )),
+                )
+                .unwrap();
+
+                // Add the org.example package to the file
+                prepend_to_file(
+                    &temp_dir.join(format!(
+                        "src/main/java/org/example/{project_name}.java"
+                    )).to_str().unwrap(), "package org.example;").unwrap();
+
+                // Run the tests with gradle
+                run_tests_with_gradle(temp_dir.to_str().unwrap());
+
+                // Parse the test result xml file
+                let mut f = File::open(
+                    temp_dir.join("build/test-results/test/TEST-org.example.TestProject.xml")).unwrap();
+                let mut contents = String::new();
+                f.read_to_string(&mut contents).unwrap();
+                let test_suite = from_str::<TestSuite>(&contents).unwrap();
+                let total_tests: i32 = test_suite.tests.parse().unwrap();
+                let failed_tests = test_suite.failures.parse::<i32>().unwrap() + test_suite.errors.parse::<i32>().unwrap();
+                let passed_tests = total_tests - failed_tests;
+
+                // Delete the temp directory
+                std::fs::remove_dir_all(&temp_dir).unwrap();
 
                 Row {
-                    test: if output.status.success() {
-                        "Passed".to_owned()
-                    } else {
-                        "Failed".to_owned()
-                    },
-                    sid: student_details[0].to_owned(),
-                    name: format!(
+                    test_result: if test_result == "" {format!("Passed {passed_tests} / {total_tests} tests").to_owned()} else {test_result.to_owned()},
+                    student_id: sid.to_owned(),
+                    student_name: format!(
                         "{} {}",
-                        student_details[1].to_owned(),
-                        student_details[2].to_owned()
+                        first_name.to_owned(),
+                        last_name.to_owned()
                     ),
                 }
             })
         })
-        .collect::<Vec<_>>();
+        .collect();
 
     for thread in tasks {
         result.rows.push(thread.await.unwrap());
