@@ -18,11 +18,10 @@ use s3::{download_file, list_files};
 use serde_xml_rs::from_str;
 use std::{
     collections::HashSet,
-    env::temp_dir,
     fs::File,
     io::{Read, Write},
 };
-use tempfile::{tempdir, tempdir_in, TempDir};
+use tempfile::tempdir;
 use tokio::task::spawn_blocking;
 
 struct AppConfig {
@@ -82,12 +81,19 @@ async fn index(
     client: &State<Client>,
     task: Json<Task<'_>>,
 ) -> &'static str {
+    let test_run_temp_dir = tempdir().unwrap();
+    std::fs::create_dir_all(&test_run_temp_dir).unwrap();
+
+    let test_file_path = test_run_temp_dir.path().join("Test.java");
+    let project_directory = test_run_temp_dir.path().join("project");
+    let output_directory = test_run_temp_dir.path().join("output");
+
     // Download specified test file
     download_file(
         &client,
         &cfg.bucket_name,
         task.s3_key_test_file,
-        "/tmp/tests/Test.java",
+        test_file_path.to_str().unwrap(),
     )
     .await
     .unwrap();
@@ -110,7 +116,7 @@ async fn index(
             &client,
             &cfg.bucket_name,
             &file,
-            &format!("/tmp/projects/{}", file),
+            project_directory.join(file).to_str().unwrap(),
         )
         .await
         .unwrap();
@@ -130,118 +136,136 @@ async fn index(
     }
 
     let mut result: TestResult = TestResult { rows: vec![] };
+    let mut tasks = vec![];
 
     // Run processing-java on each of the project paths as well as the tests using gradle
-    let tasks: Vec<_> = project_paths
-        .iter()
-        .map(|path| {
-            let path = path.to_owned();
-            let student_info = std::path::Path::new(&path)
-                .parent()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
-            let project_name = std::path::Path::new(&path)
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_owned();
+    for project_path in &project_paths {
+        let project_path = project_path.to_owned();
+        let student_info = std::path::Path::new(&project_path)
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let project_name = std::path::Path::new(&project_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
 
-            spawn_blocking(move || {
-                let student_details: Vec<&str> = student_info.split("_").collect();
-                let sid = student_details[0];
-                let first_name = student_details[1];
-                let last_name = student_details[2];
+        let project_directory = project_directory.clone();
+        let output_directory = output_directory.clone();
+        let test_file_path = test_file_path.clone();
+        let handle = spawn_blocking(move || {
+            let student_details: Vec<&str> = student_info.split("_").collect();
+            let sid = student_details[0];
+            let first_name = student_details[1];
+            let last_name = student_details[2];
 
-                let temp_dir = tempdir_in("/Users/jb/Desktop/test").unwrap().path().join(sid);
-                std::fs::create_dir_all(&temp_dir).unwrap();
+            let temp_dir = tempdir().unwrap().path().join(sid);
+            std::fs::create_dir_all(&temp_dir).unwrap();
 
-                // Run processing-java
-                let output = std::process::Command::new("processing-java")
-                    .arg("--force")
-                    .arg(format!("--sketch=/tmp/projects/{path}"))
-                    .arg(format!("--output=/tmp/output/{path}"))
-                    .arg("--build")
-                    .output()
-                    .expect("failed to execute process");
+            // Run processing-java
+            let output = std::process::Command::new("processing-java")
+                .arg("--force")
+                .arg(format!(
+                    "--sketch={}",
+                    project_directory.join(&project_path).to_str().unwrap()
+                ))
+                .arg(format!(
+                    "--output={}",
+                    &output_directory.join(&project_path).to_str().unwrap()
+                ))
+                .arg("--build")
+                .output()
+                .expect("failed to execute process");
 
-                let mut test_result = String::default();
+            let mut test_result = String::default();
 
-                if !output.status.success() {
-                    test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
-                }
+            if !output.status.success() {
+                test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
 
-                // Copy the java project template for this project
-                std::process::Command::new("cp")
-                    .arg("-r")
-                    .arg("src/templates/testing-project/")
-                    .arg(&temp_dir)
-                    .output()
-                    .expect("failed to copy testing project");
+            // Copy the java project template for this project
+            std::process::Command::new("cp")
+                .arg("-r")
+                .arg("src/templates/testing-project/")
+                .arg(&temp_dir)
+                .output()
+                .expect("failed to copy testing project");
 
+            println!(
+                "Copying {} to {}/src/main/java/org/example/Test.java",
+                test_file_path.to_str().unwrap(),
+                temp_dir.to_str().unwrap()
+            );
 
-                println!(
-                    "Copying /tmp/tests/Test.java to {}/src/main/java/org/example/Test.java", temp_dir.to_str().unwrap()
+            // Move the downloaded test file at `test_file_path` to {temp_dir}/src/test/java/org/example/Test.java
+            std::fs::copy(
+                test_file_path.to_str().unwrap(),
+                temp_dir.join("src/test/java/org/example/Test.java"),
+            )
+            .unwrap();
+
+            println!(
+                    "Copying {}/source/{project_name}.java to {}/src/main/java/org/example/{project_name}.java", &output_directory.join(&project_path).to_str().unwrap(), temp_dir.to_str().unwrap()
                 );
 
-                // Move the downloaded test file at /tmp/tests/Test.java to {temp_dir}/src/test/java/org/example/Test.java
-                std::fs::copy(
-                    "/tmp/tests/Test.java",
-                    &temp_dir.join("src/test/java/org/example/Test.java"),
-                )
-                .unwrap();
+            // Move the compiled {project_name}.java to {temp_dir}/src/main/java/org/example/{project_name}.java
+            std::fs::copy(
+                format!(
+                    "{}/source/{project_name}.java",
+                    output_directory.join(&project_path).to_str().unwrap()
+                ),
+                temp_dir.join(format!("src/main/java/org/example/{project_name}.java")),
+            )
+            .unwrap();
 
-                println!(
-                    "Copying /tmp/output/{path}/source/{project_name}.java to {}/src/main/java/org/example/{project_name}.java", temp_dir.to_str().unwrap()
-                );
+            // Add the org.example package to the file
+            prepend_to_file(
+                &temp_dir
+                    .join(format!("src/main/java/org/example/{project_name}.java"))
+                    .to_str()
+                    .unwrap(),
+                "package org.example;",
+            )
+            .unwrap();
 
-                // Move the compiled {project_name}.java to {temp_dir}/src/main/java/org/example/{project_name}.java
-                std::fs::copy(
-                    format!("/tmp/output/{path}/source/{project_name}.java"),
-                    &temp_dir.join(format!(
-                        "src/main/java/org/example/{project_name}.java"
-                    )),
-                )
-                .unwrap();
+            // Run the tests with gradle
+            run_tests_with_gradle(temp_dir.to_str().unwrap());
 
-                // Add the org.example package to the file
-                prepend_to_file(
-                    &temp_dir.join(format!(
-                        "src/main/java/org/example/{project_name}.java"
-                    )).to_str().unwrap(), "package org.example;").unwrap();
+            // Parse the test result xml file
+            let mut f = File::open(
+                temp_dir.join("build/test-results/test/TEST-org.example.TestProject.xml"),
+            )
+            .unwrap();
+            let mut contents = String::new();
+            f.read_to_string(&mut contents).unwrap();
+            let test_suite = from_str::<TestSuite>(&contents).unwrap();
+            let total_tests: i32 = test_suite.tests.parse().unwrap();
+            let failed_tests = test_suite.failures.parse::<i32>().unwrap()
+                + test_suite.errors.parse::<i32>().unwrap();
+            let passed_tests = total_tests - failed_tests;
 
-                // Run the tests with gradle
-                run_tests_with_gradle(temp_dir.to_str().unwrap());
+            // Delete the temp directory
+            std::fs::remove_dir_all(&temp_dir).unwrap();
 
-                // Parse the test result xml file
-                let mut f = File::open(
-                    temp_dir.join("build/test-results/test/TEST-org.example.TestProject.xml")).unwrap();
-                let mut contents = String::new();
-                f.read_to_string(&mut contents).unwrap();
-                let test_suite = from_str::<TestSuite>(&contents).unwrap();
-                let total_tests: i32 = test_suite.tests.parse().unwrap();
-                let failed_tests = test_suite.failures.parse::<i32>().unwrap() + test_suite.errors.parse::<i32>().unwrap();
-                let passed_tests = total_tests - failed_tests;
+            Row {
+                test_result: if test_result == "" {
+                    format!("Passed {passed_tests} / {total_tests} tests").to_owned()
+                } else {
+                    test_result.to_owned()
+                },
+                student_id: sid.to_owned(),
+                student_name: format!("{} {}", first_name.to_owned(), last_name.to_owned()),
+            }
+        });
 
-                // Delete the temp directory
-                std::fs::remove_dir_all(&temp_dir).unwrap();
-
-                Row {
-                    test_result: if test_result == "" {format!("Passed {passed_tests} / {total_tests} tests").to_owned()} else {test_result.to_owned()},
-                    student_id: sid.to_owned(),
-                    student_name: format!(
-                        "{} {}",
-                        first_name.to_owned(),
-                        last_name.to_owned()
-                    ),
-                }
-            })
-        })
-        .collect();
+        tasks.push(handle);
+    }
 
     for thread in tasks {
         result.rows.push(thread.await.unwrap());
