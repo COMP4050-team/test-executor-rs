@@ -3,14 +3,19 @@ extern crate rocket;
 
 use aws_sdk_s3::{types::ByteStream, Client, Region};
 use rocket::{
-    futures::TryStreamExt,
+    futures::{FutureExt, TryStreamExt},
     serde::{
         json::{serde_json, Json},
         Deserialize, Serialize,
     },
+    State,
 };
 use std::{collections::HashSet, fs::File, io::Write};
 use tokio::task::spawn_blocking;
+
+struct AppConfig {
+    bucket_name: String,
+}
 
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -41,16 +46,12 @@ struct Row {
 
 async fn download_file(
     client: &Client,
+    bucket: &str,
     s3_key: &str,
     out_file: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Download test file
-    let resp = client
-        .get_object()
-        .bucket("uploads-76078f4")
-        .key(s3_key)
-        .send()
-        .await;
+    let resp = client.get_object().bucket(bucket).key(s3_key).send().await;
 
     if let Err(e) = resp {
         println!("Error: {:?}", e);
@@ -73,11 +74,12 @@ async fn download_file(
 
 async fn list_files<'a>(
     client: &'a Client,
+    bucket: &str,
     prefix: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let resp = client
         .list_objects_v2()
-        .bucket("uploads-76078f4")
+        .bucket(bucket)
         .prefix(prefix)
         .send()
         .await;
@@ -99,20 +101,25 @@ async fn list_files<'a>(
 }
 
 #[post("/", data = "<task>")]
-async fn index(task: Json<Task<'_>>) -> &'static str {
-    let config = aws_config::from_env()
-        .region(Region::new("ap-southeast-2"))
-        .load()
-        .await;
-    let client = Client::new(&config);
-
+async fn index(
+    cfg: &State<AppConfig>,
+    client: &State<Client>,
+    task: Json<Task<'_>>,
+) -> &'static str {
     // Download test file
-    download_file(&client, task.s3_key_test_file, "/tmp/tests/Test.java")
+    download_file(
+        &client,
+        &cfg.bucket_name,
+        task.s3_key_test_file,
+        "/tmp/tests/Test.java",
+    )
         .await
         .unwrap();
 
     // List all the files in the project
-    let files = list_files(&client, task.s3_key_project_file).await.unwrap();
+    let files = list_files(&client, &cfg.bucket_name, task.s3_key_project_file)
+        .await
+        .unwrap();
 
     // Filter out all non .pde files
     let files: HashSet<_> = files
@@ -123,7 +130,12 @@ async fn index(task: Json<Task<'_>>) -> &'static str {
 
     // Download each of the files into the projects directory
     for file in &files {
-        download_file(&client, &file, &format!("/tmp/projects/{}", file))
+        download_file(
+            &client,
+            &cfg.bucket_name,
+            &file,
+            &format!("/tmp/projects/{}", file),
+        )
             .await
             .unwrap();
     }
@@ -204,7 +216,7 @@ async fn index(task: Json<Task<'_>>) -> &'static str {
     // Upload compile_error as a json file to S3
     let resp = client
         .put_object()
-        .bucket("uploads-76078f4")
+        .bucket(&cfg.bucket_name)
         .key(format!("{}/Results/result.json", assignment_dir))
         .body(body)
         .send()
@@ -220,5 +232,19 @@ async fn index(task: Json<Task<'_>>) -> &'static str {
 
 #[launch]
 fn rocket() -> _ {
-    rocket::build().mount("/", routes![index])
+    let cfg = AppConfig {
+        bucket_name: "uploads-76078f4".into(),
+    };
+
+    let aws_config = aws_config::from_env()
+        .region(Region::new("ap-southeast-2"))
+        .load()
+        .now_or_never()
+        .unwrap();
+    let client = Client::new(&aws_config);
+
+    rocket::build()
+        .manage(cfg)
+        .manage(client)
+        .mount("/", routes![index])
 }
