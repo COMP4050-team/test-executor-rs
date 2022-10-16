@@ -10,6 +10,7 @@ use rocket::{
     },
 };
 use std::{collections::HashSet, fs::File, io::Write};
+use tokio::task::spawn_blocking;
 
 #[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -30,8 +31,11 @@ struct TestResult {
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct Row {
+    #[serde(rename = "Test")]
     test: String,
-    id: String,
+    #[serde(rename = "SID")]
+    sid: String,
+    #[serde(rename = "Name")]
     name: String,
 }
 
@@ -125,11 +129,11 @@ async fn index(task: Json<Task<'_>>) -> &'static str {
     }
 
     // Get the project paths
-    let project_paths: HashSet<&str> = files
+    let project_paths: HashSet<String> = files
         .iter()
         .map(|f| {
-            let path = std::path::Path::new(f);
-            path.parent().unwrap().to_str().unwrap()
+            let path = std::path::Path::new(f).to_owned();
+            path.parent().unwrap().to_str().unwrap().to_owned()
         })
         .collect();
 
@@ -142,43 +146,49 @@ async fn index(task: Json<Task<'_>>) -> &'static str {
     let mut result: TestResult = TestResult { rows: vec![] };
 
     // Run processing-java on each of the project paths
-    for path in &project_paths {
-        // Get the student information from the path
-        let student_info = std::path::Path::new(path)
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap();
+    let tasks = project_paths
+        .iter()
+        .map(|path| {
+            let path = path.to_owned();
+            let student_info = std::path::Path::new(&path)
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
 
-        let output = std::process::Command::new("processing-java")
-            .arg("--force")
-            .arg(format!("--sketch=/tmp/projects/{path}"))
-            .arg(format!("--output=/tmp/output/{path}"))
-            .arg("--build")
-            .output()
-            .expect("failed to execute process");
+            spawn_blocking(move || {
+                let output = std::process::Command::new("processing-java")
+                    .arg("--force")
+                    .arg(format!("--sketch=/tmp/projects/{path}"))
+                    .arg(format!("--output=/tmp/output/{path}"))
+                    .arg("--build")
+                    .output()
+                    .expect("failed to execute process");
 
-        println!("status: {}", output.status);
-        println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
-        println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+                let student_details: Vec<&str> = student_info.split("_").collect();
 
-        let student_details: Vec<&str> = student_info.split("_").collect();
+                Row {
+                    test: if output.status.success() {
+                        "Passed".to_owned()
+                    } else {
+                        "Failed".to_owned()
+                    },
+                    sid: student_details[0].to_owned(),
+                    name: format!(
+                        "{} {}",
+                        student_details[1].to_owned(),
+                        student_details[2].to_owned()
+                    ),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
 
-        result.rows.push(Row {
-            test: if output.status.success() {
-                "Passed".to_owned()
-            } else {
-                "Failed".to_owned()
-            },
-            id: student_details[0].to_owned(),
-            name: format!(
-                "{} {}",
-                student_details[1].to_owned(),
-                student_details[2].to_owned()
-            ),
-        });
+    for thread in tasks {
+        result.rows.push(thread.await.unwrap());
     }
 
     let serialised = serde_json::to_string(&result).unwrap();
