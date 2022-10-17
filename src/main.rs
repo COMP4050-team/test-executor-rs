@@ -68,11 +68,15 @@ fn prepend_to_file(file: &str, prefix: &str) -> Result<(), Box<dyn std::error::E
 }
 
 fn run_tests_with_gradle(project_path: &str) {
-    std::process::Command::new("./gradlew")
+    let output = std::process::Command::new("./gradlew")
         .arg("test")
         .current_dir(project_path)
         .output()
         .expect("failed to execute process");
+
+    println!("status: {}", output.status);
+    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
 }
 
 #[post("/", data = "<task>")]
@@ -81,12 +85,12 @@ async fn index(
     client: &State<Client>,
     task: Json<Task<'_>>,
 ) -> &'static str {
-    let test_run_temp_dir = tempdir().unwrap();
-    std::fs::create_dir_all(&test_run_temp_dir).unwrap();
+    let test_run_temp_dir = tempdir().unwrap().into_path();
+    // std::fs::create_dir_all(&test_run_temp_dir).unwrap();
 
-    let test_file_path = test_run_temp_dir.path().join("Test.java");
-    let project_directory = test_run_temp_dir.path().join("project");
-    let output_directory = test_run_temp_dir.path().join("output");
+    let test_file_path = test_run_temp_dir.join("Test.java");
+    let project_directory = test_run_temp_dir.join("project");
+    let output_directory = test_run_temp_dir.join("output");
 
     // Download specified test file
     download_file(
@@ -165,8 +169,8 @@ async fn index(
             let first_name = student_details[1];
             let last_name = student_details[2];
 
-            let project_temp_dir = tempdir().unwrap().path().join(sid);
-            std::fs::create_dir_all(&project_temp_dir).unwrap();
+            let project_temp_dir = tempdir().unwrap().into_path().join(sid);
+            // std::fs::create_dir_all(&project_temp_dir).unwrap();
 
             // Run processing-java
             let output = std::process::Command::new("processing-java")
@@ -190,12 +194,20 @@ async fn index(
             }
 
             // Copy the java project template for this project
-            std::process::Command::new("cp")
+            println!(
+                "Running: cp -r templates/testing-project/ {}",
+                project_temp_dir.to_str().unwrap()
+            );
+            let output = std::process::Command::new("cp")
                 .arg("-r")
                 .arg("templates/testing-project/")
                 .arg(&project_temp_dir)
                 .output()
                 .expect("failed to copy testing project");
+
+            if !output.status.success() {
+                test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+            }
 
             println!(
                 "Copying {} to {}/src/main/java/org/example/Test.java",
@@ -251,7 +263,7 @@ async fn index(
             let passed_tests = total_tests - failed_tests;
 
             // Delete the temp directory
-            std::fs::remove_dir_all(&project_temp_dir).unwrap();
+            // std::fs::remove_dir_all(&project_temp_dir).unwrap();
 
             Row {
                 test_result: if test_result.is_empty() {

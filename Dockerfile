@@ -14,24 +14,33 @@ COPY Cargo.toml .
 
 RUN sed -i 's#src/main.rs#dummy.rs#' Cargo.toml
 
-RUN CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release
+RUN CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --target x86_64-unknown-linux-musl
 
 RUN sed -i 's#dummy.rs#src/main.rs#' Cargo.toml
 ### End hacky magic
 
+# Add muscl-gcc so we can statically link libc.
+# The runner image is alpine and doesn't have the right version of glibc available for dynamic linking
+RUN apt update
+RUN apt install -y musl-tools
+
 COPY . .
 
-RUN cargo build --release
+RUN rustup target add x86_64-unknown-linux-musl
+
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
 ####
 
-FROM rust:1-buster
+FROM amazoncorretto:8
 
-COPY --from=builder /app/target/release/test-executor-rs /usr/local/bin/test-executor-rs
+WORKDIR /app
+
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/test-executor-rs test-executor-rs
 COPY --from=builder /usr/local/bin/processing /usr/local/bin/processing
 
-COPY templates /usr/local/bin/templates
+COPY templates ./templates
 
-COPY docker-entrypoint.sh /docker-entrypoint.sh
+COPY docker-entrypoint.sh ./
 
-ENTRYPOINT [ "/docker-entrypoint.sh" ]
+ENTRYPOINT [ "./docker-entrypoint.sh" ]
