@@ -30,6 +30,8 @@ FROM rust:1-buster
 COPY --from=builder /app/target/release/test-executor-rs /usr/local/bin/test-executor-rs
 COPY --from=builder /usr/local/bin/processing /usr/local/bin/processing
 
-CMD ["./target/release/test-executor-rs"]
+COPY templates /usr/local/bin/templates
 
+COPY docker-entrypoint.sh /docker-entrypoint.sh
 
+ENTRYPOINT [ "/docker-entrypoint.sh" ]

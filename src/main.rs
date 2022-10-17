@@ -165,8 +165,8 @@ async fn index(
             let first_name = student_details[1];
             let last_name = student_details[2];
 
-            let temp_dir = tempdir().unwrap().path().join(sid);
-            std::fs::create_dir_all(&temp_dir).unwrap();
+            let project_temp_dir = tempdir().unwrap().path().join(sid);
+            std::fs::create_dir_all(&project_temp_dir).unwrap();
 
             // Run processing-java
             let output = std::process::Command::new("processing-java")
@@ -192,26 +192,26 @@ async fn index(
             // Copy the java project template for this project
             std::process::Command::new("cp")
                 .arg("-r")
-                .arg("src/templates/testing-project/")
-                .arg(&temp_dir)
+                .arg("templates/testing-project/")
+                .arg(&project_temp_dir)
                 .output()
                 .expect("failed to copy testing project");
 
             println!(
                 "Copying {} to {}/src/main/java/org/example/Test.java",
                 test_file_path.to_str().unwrap(),
-                temp_dir.to_str().unwrap()
+                project_temp_dir.to_str().unwrap()
             );
 
             // Move the downloaded test file at `test_file_path` to {temp_dir}/src/test/java/org/example/Test.java
             std::fs::copy(
                 test_file_path.to_str().unwrap(),
-                temp_dir.join("src/test/java/org/example/Test.java"),
+                project_temp_dir.join("src/test/java/org/example/Test.java"),
             )
             .unwrap();
 
             println!(
-                    "Copying {}/source/{project_name}.java to {}/src/main/java/org/example/{project_name}.java", &output_directory.join(&project_path).to_str().unwrap(), temp_dir.to_str().unwrap()
+                    "Copying {}/source/{project_name}.java to {}/src/main/java/org/example/{project_name}.java", &output_directory.join(&project_path).to_str().unwrap(), project_temp_dir.to_str().unwrap()
                 );
 
             // Move the compiled {project_name}.java to {temp_dir}/src/main/java/org/example/{project_name}.java
@@ -220,13 +220,13 @@ async fn index(
                     "{}/source/{project_name}.java",
                     output_directory.join(&project_path).to_str().unwrap()
                 ),
-                temp_dir.join(format!("src/main/java/org/example/{project_name}.java")),
+                project_temp_dir.join(format!("src/main/java/org/example/{project_name}.java")),
             )
             .unwrap();
 
             // Add the org.example package to the file
             prepend_to_file(
-                temp_dir
+                project_temp_dir
                     .join(format!("src/main/java/org/example/{project_name}.java"))
                     .to_str()
                     .unwrap(),
@@ -235,11 +235,11 @@ async fn index(
             .unwrap();
 
             // Run the tests with gradle
-            run_tests_with_gradle(temp_dir.to_str().unwrap());
+            run_tests_with_gradle(project_temp_dir.to_str().unwrap());
 
             // Parse the test result xml file
             let mut f = File::open(
-                temp_dir.join("build/test-results/test/TEST-org.example.TestProject.xml"),
+                project_temp_dir.join("build/test-results/test/TEST-org.example.TestProject.xml"),
             )
             .unwrap();
             let mut contents = String::new();
@@ -251,7 +251,7 @@ async fn index(
             let passed_tests = total_tests - failed_tests;
 
             // Delete the temp directory
-            std::fs::remove_dir_all(&temp_dir).unwrap();
+            std::fs::remove_dir_all(&project_temp_dir).unwrap();
 
             Row {
                 test_result: if test_result.is_empty() {
