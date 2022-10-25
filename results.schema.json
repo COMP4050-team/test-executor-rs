@@ -1,0 +1,57 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "",
+    "title": "Results",
+    "description": "The results returned from the test-executor",
+    "type": "object",
+    "properties": {
+        "results": {
+            "description": "The results of the test-executor",
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "student_id": {
+                        "description": "The student's ID",
+                        "type": "string"
+                    },
+                    "student_name": {
+                        "description": "The student's name",
+                        "type": "string"
+                    },
+                    "tests": {
+                        "description": "The tests that were run",
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "description": "The name of the test",
+                                    "type": "string"
+                                },
+                                "passed": {
+                                    "description": "Whether the test passed",
+                                    "type": "boolean"
+                                },
+                                "message": {
+                                    "description": "The message returned from the test",
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "name",
+                                "passed",
+                                "message"
+                            ]
+                        }
+                    }
+                },
+                "required": [
+                    "student_id",
+                    "student_name",
+                    "tests"
+                ]
+            }
+        }
+    }
+}
