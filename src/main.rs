@@ -4,8 +4,9 @@ mod s3;
 #[macro_use]
 extern crate rocket;
 
-use crate::junit_xml::TestSuite;
+use crate::junit_xml::{TestSuite, TestSuiteChild};
 use aws_sdk_s3::{types::ByteStream, Client, Region};
+use rocket::tokio::spawn;
 use rocket::{
     futures::FutureExt,
     serde::{
@@ -28,31 +29,42 @@ struct AppConfig {
     bucket_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(crate = "rocket::serde")]
-struct Task<'a> {
+struct Task {
     // Deserialize the following field as `s3KeyTestFile` instead of `s3_key_test_file`.
     #[serde(rename = "s3KeyTestFile")]
-    s3_key_test_file: &'a str,
+    s3_key_test_file: String,
     #[serde(rename = "s3KeyProjectFile")]
-    s3_key_project_file: &'a str,
+    s3_key_project_file: String,
 }
 
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct TestResult {
-    rows: Vec<Row>,
+    results: Vec<StudentResult>,
 }
 
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
-struct Row {
-    #[serde(rename = "Test")]
-    test_result: String,
-    #[serde(rename = "SID")]
+struct StudentResult {
+    #[serde(rename = "tests")]
+    tests: Vec<UnitTestResult>,
+    #[serde(rename = "student_id")]
     student_id: String,
-    #[serde(rename = "Name")]
+    #[serde(rename = "student_name")]
     student_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct UnitTestResult {
+    #[serde(rename = "name")]
+    name: String,
+    #[serde(rename = "passed")]
+    passed: bool,
+    #[serde(rename = "message")]
+    message: String,
 }
 
 fn prepend_to_file(file: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -80,11 +92,23 @@ fn run_tests_with_gradle(project_path: &str) {
 }
 
 #[post("/", data = "<task>")]
-async fn index(
-    cfg: &State<AppConfig>,
-    client: &State<Client>,
-    task: Json<Task<'_>>,
-) -> &'static str {
+fn index(cfg: &State<AppConfig>, task: Json<Task>) -> &'static str {
+    // Make a hard copy of cfg.bucket_name
+    let bucket_name = cfg.bucket_name.clone();
+
+    spawn(run_tests(bucket_name, task));
+
+    "Running!"
+}
+
+async fn run_tests(bucket_name: String, task: Json<Task>) {
+    let aws_config = aws_config::from_env()
+        .region(Region::new("ap-southeast-2"))
+        .load()
+        .now_or_never()
+        .unwrap();
+    let client = Client::new(&aws_config);
+
     let test_run_temp_dir = tempdir().unwrap().into_path();
     // std::fs::create_dir_all(&test_run_temp_dir).unwrap();
 
@@ -94,16 +118,16 @@ async fn index(
 
     // Download specified test file
     download_file(
-        client,
-        &cfg.bucket_name,
-        task.s3_key_test_file,
+        &client,
+        &bucket_name,
+        &task.s3_key_test_file,
         test_file_path.to_str().unwrap(),
     )
     .await
     .unwrap();
 
     // List all the files in the project
-    let files = list_files(client, &cfg.bucket_name, task.s3_key_project_file)
+    let files = list_files(&client, &bucket_name, &task.s3_key_project_file)
         .await
         .unwrap();
 
@@ -117,8 +141,8 @@ async fn index(
     // Download each of the files into the projects directory
     for file in &files {
         download_file(
-            client,
-            &cfg.bucket_name,
+            &client,
+            &bucket_name,
             file,
             project_directory.join(file).to_str().unwrap(),
         )
@@ -139,7 +163,7 @@ async fn index(
         println!("{} ", path);
     }
 
-    let mut result: TestResult = TestResult { rows: vec![] };
+    let mut result: TestResult = TestResult { results: vec![] };
     let mut tasks = vec![];
 
     // Run processing-java on each of the project paths as well as the tests using gradle
@@ -187,10 +211,8 @@ async fn index(
                 .output()
                 .expect("failed to execute process");
 
-            let mut test_result = String::default();
-
             if !output.status.success() {
-                test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+                println!("Error: {}", String::from_utf8_lossy(&output.stderr));
             }
 
             // Copy the java project template for this project
@@ -206,7 +228,7 @@ async fn index(
                 .expect("failed to copy testing project");
 
             if !output.status.success() {
-                test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+                println!("Error: {}", String::from_utf8_lossy(&output.stderr));
             }
 
             println!(
@@ -257,20 +279,33 @@ async fn index(
             let mut contents = String::new();
             f.read_to_string(&mut contents).unwrap();
             let test_suite = from_str::<TestSuite>(&contents).unwrap();
-            let total_tests: i32 = test_suite.tests.parse().unwrap();
-            let failed_tests = test_suite.failures.parse::<i32>().unwrap()
-                + test_suite.errors.parse::<i32>().unwrap();
-            let passed_tests = total_tests - failed_tests;
 
             // Delete the temp directory
             // std::fs::remove_dir_all(&project_temp_dir).unwrap();
 
-            Row {
-                test_result: if test_result.is_empty() {
-                    format!("Passed {passed_tests} / {total_tests} tests")
-                } else {
-                    test_result
-                },
+            let mut unit_test_results = vec![];
+
+            test_suite.children.iter().for_each(|test_suite_child| {
+                if let TestSuiteChild::TestCase(testcase) = test_suite_child {
+                    // set message to the failures message if there is a failure or the errors message if there is an error
+                    let message = match &testcase.failure {
+                        Some(failure) => &failure.message,
+                        None => match &testcase.error {
+                            Some(error) => error,
+                            None => "",
+                        },
+                    };
+
+                    unit_test_results.push(UnitTestResult {
+                        name: testcase.name.clone(),
+                        passed: testcase.failure == None && testcase.error == None,
+                        message: message.to_string(),
+                    });
+                }
+            });
+
+            StudentResult {
+                tests: unit_test_results,
                 student_id: sid.to_owned(),
                 student_name: format!("{} {}", first_name.to_owned(), last_name.to_owned()),
             }
@@ -280,14 +315,14 @@ async fn index(
     }
 
     for thread in tasks {
-        result.rows.push(thread.await.unwrap());
+        result.results.push(thread.await.unwrap());
     }
 
     let serialised = serde_json::to_string(&result).unwrap();
     let body = ByteStream::from(serialised.as_bytes().to_vec());
 
     // Get S3 assignment directory
-    let assignment_dir = std::path::Path::new(task.s3_key_project_file)
+    let assignment_dir = std::path::Path::new(&task.s3_key_project_file)
         .parent()
         .unwrap()
         .to_str()
@@ -296,7 +331,7 @@ async fn index(
     // Upload compile_error as a json file to S3
     let resp = client
         .put_object()
-        .bucket(&cfg.bucket_name)
+        .bucket(bucket_name)
         .key(format!("{}/Results/result.json", assignment_dir))
         .body(body)
         .send()
@@ -304,10 +339,7 @@ async fn index(
 
     if let Err(e) = resp {
         println!("Error: {:?}", e);
-        return "Error uploading file to S3";
     }
-
-    "Done!"
 }
 
 #[launch]
@@ -316,15 +348,5 @@ fn rocket() -> _ {
         bucket_name: "uploads-76078f4".into(),
     };
 
-    let aws_config = aws_config::from_env()
-        .region(Region::new("ap-southeast-2"))
-        .load()
-        .now_or_never()
-        .unwrap();
-    let client = Client::new(&aws_config);
-
-    rocket::build()
-        .manage(cfg)
-        .manage(client)
-        .mount("/", routes![index])
+    rocket::build().manage(cfg).mount("/", routes![index])
 }
