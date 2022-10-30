@@ -1,6 +1,6 @@
 use rocket::serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "rocket::serde")]
 pub struct TestSuite {
     name: String,
@@ -9,12 +9,12 @@ pub struct TestSuite {
     pub errors: String,
     time: String,
     #[serde(rename = "$value")]
-    children: Vec<TestSuiteChild>,
+    pub children: Vec<TestSuiteChild>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "rocket::serde")]
-enum TestSuiteChild {
+pub enum TestSuiteChild {
     #[serde(rename = "properties")]
     Properties(Properties),
     #[serde(rename = "testcase")]
@@ -25,26 +25,26 @@ enum TestSuiteChild {
     SystemErr(String),
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "rocket::serde")]
-struct Properties {}
+pub struct Properties {}
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "rocket::serde")]
-struct TestCase {
-    name: String,
-    classname: String,
-    time: String,
-    failure: Option<Failure>,
-    error: Option<String>,
+pub struct TestCase {
+    pub name: String,
+    pub classname: String,
+    pub time: String,
+    pub failure: Option<Failure>,
+    pub error: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(crate = "rocket::serde")]
-struct Failure {
-    message: String,
+pub struct Failure {
+    pub message: String,
     #[serde(rename = "type")]
-    failure_type: String,
+    pub failure_type: String,
     #[serde(rename = "$value")]
-    value: String,
+    pub value: String,
 }

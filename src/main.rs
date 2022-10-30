@@ -4,7 +4,7 @@ mod s3;
 #[macro_use]
 extern crate rocket;
 
-use crate::junit_xml::TestSuite;
+use crate::junit_xml::{TestSuite, TestSuiteChild};
 use aws_sdk_s3::{types::ByteStream, Client, Region};
 use rocket::{
     futures::FutureExt,
@@ -41,18 +41,29 @@ struct Task<'a> {
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
 struct TestResult {
-    rows: Vec<Row>,
+    results: Vec<StudentResult>,
 }
 
 #[derive(Serialize)]
 #[serde(crate = "rocket::serde")]
-struct Row {
-    #[serde(rename = "Test")]
-    test_result: String,
-    #[serde(rename = "SID")]
+struct StudentResult {
+    #[serde(rename = "tests")]
+    tests: Vec<UnitTestResult>,
+    #[serde(rename = "student_id")]
     student_id: String,
-    #[serde(rename = "Name")]
+    #[serde(rename = "student_name")]
     student_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct UnitTestResult {
+    #[serde(rename = "name")]
+    name: String,
+    #[serde(rename = "passed")]
+    passed: bool,
+    #[serde(rename = "message")]
+    message: String,
 }
 
 fn prepend_to_file(file: &str, prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -139,7 +150,7 @@ async fn index(
         println!("{} ", path);
     }
 
-    let mut result: TestResult = TestResult { rows: vec![] };
+    let mut result: TestResult = TestResult { results: vec![] };
     let mut tasks = vec![];
 
     // Run processing-java on each of the project paths as well as the tests using gradle
@@ -187,10 +198,8 @@ async fn index(
                 .output()
                 .expect("failed to execute process");
 
-            let mut test_result = String::default();
-
             if !output.status.success() {
-                test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+                println!("Error: {}", String::from_utf8_lossy(&output.stderr));
             }
 
             // Copy the java project template for this project
@@ -206,7 +215,7 @@ async fn index(
                 .expect("failed to copy testing project");
 
             if !output.status.success() {
-                test_result = format!("Error: {}", String::from_utf8_lossy(&output.stderr));
+                println!("Error: {}", String::from_utf8_lossy(&output.stderr));
             }
 
             println!(
@@ -257,20 +266,33 @@ async fn index(
             let mut contents = String::new();
             f.read_to_string(&mut contents).unwrap();
             let test_suite = from_str::<TestSuite>(&contents).unwrap();
-            let total_tests: i32 = test_suite.tests.parse().unwrap();
-            let failed_tests = test_suite.failures.parse::<i32>().unwrap()
-                + test_suite.errors.parse::<i32>().unwrap();
-            let passed_tests = total_tests - failed_tests;
 
             // Delete the temp directory
             // std::fs::remove_dir_all(&project_temp_dir).unwrap();
 
-            Row {
-                test_result: if test_result.is_empty() {
-                    format!("Passed {passed_tests} / {total_tests} tests")
-                } else {
-                    test_result
-                },
+            let mut unit_test_results = vec![];
+
+            test_suite.children.iter().for_each(|test_suite_child| {
+                if let TestSuiteChild::TestCase(testcase) = test_suite_child {
+                    // set message to the failures message if there is a failure or the errors message if there is an error
+                    let message = match &testcase.failure {
+                        Some(failure) => &failure.message,
+                        None => match &testcase.error {
+                            Some(error) => error,
+                            None => "",
+                        },
+                    };
+
+                    unit_test_results.push(UnitTestResult {
+                        name: testcase.name.clone(),
+                        passed: testcase.failure == None && testcase.error == None,
+                        message: message.to_string(),
+                    });
+                }
+            });
+
+            StudentResult {
+                tests: unit_test_results,
                 student_id: sid.to_owned(),
                 student_name: format!("{} {}", first_name.to_owned(), last_name.to_owned()),
             }
@@ -280,7 +302,7 @@ async fn index(
     }
 
     for thread in tasks {
-        result.rows.push(thread.await.unwrap());
+        result.results.push(thread.await.unwrap());
     }
 
     let serialised = serde_json::to_string(&result).unwrap();
