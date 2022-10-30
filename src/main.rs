@@ -6,6 +6,7 @@ extern crate rocket;
 
 use crate::junit_xml::{TestSuite, TestSuiteChild};
 use aws_sdk_s3::{types::ByteStream, Client, Region};
+use rocket::tokio::spawn;
 use rocket::{
     futures::FutureExt,
     serde::{
@@ -28,14 +29,14 @@ struct AppConfig {
     bucket_name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(crate = "rocket::serde")]
-struct Task<'a> {
+struct Task {
     // Deserialize the following field as `s3KeyTestFile` instead of `s3_key_test_file`.
     #[serde(rename = "s3KeyTestFile")]
-    s3_key_test_file: &'a str,
+    s3_key_test_file: String,
     #[serde(rename = "s3KeyProjectFile")]
-    s3_key_project_file: &'a str,
+    s3_key_project_file: String,
 }
 
 #[derive(Serialize)]
@@ -91,11 +92,23 @@ fn run_tests_with_gradle(project_path: &str) {
 }
 
 #[post("/", data = "<task>")]
-async fn index(
-    cfg: &State<AppConfig>,
-    client: &State<Client>,
-    task: Json<Task<'_>>,
-) -> &'static str {
+fn index(cfg: &State<AppConfig>, task: Json<Task>) -> &'static str {
+    // Make a hard copy of cfg.bucket_name
+    let bucket_name = cfg.bucket_name.clone();
+
+    spawn(run_tests(bucket_name, task));
+
+    "Running!"
+}
+
+async fn run_tests(bucket_name: String, task: Json<Task>) {
+    let aws_config = aws_config::from_env()
+        .region(Region::new("ap-southeast-2"))
+        .load()
+        .now_or_never()
+        .unwrap();
+    let client = Client::new(&aws_config);
+
     let test_run_temp_dir = tempdir().unwrap().into_path();
     // std::fs::create_dir_all(&test_run_temp_dir).unwrap();
 
@@ -105,16 +118,16 @@ async fn index(
 
     // Download specified test file
     download_file(
-        client,
-        &cfg.bucket_name,
-        task.s3_key_test_file,
+        &client,
+        &bucket_name,
+        &task.s3_key_test_file,
         test_file_path.to_str().unwrap(),
     )
     .await
     .unwrap();
 
     // List all the files in the project
-    let files = list_files(client, &cfg.bucket_name, task.s3_key_project_file)
+    let files = list_files(&client, &bucket_name, &task.s3_key_project_file)
         .await
         .unwrap();
 
@@ -128,8 +141,8 @@ async fn index(
     // Download each of the files into the projects directory
     for file in &files {
         download_file(
-            client,
-            &cfg.bucket_name,
+            &client,
+            &bucket_name,
             file,
             project_directory.join(file).to_str().unwrap(),
         )
@@ -309,7 +322,7 @@ async fn index(
     let body = ByteStream::from(serialised.as_bytes().to_vec());
 
     // Get S3 assignment directory
-    let assignment_dir = std::path::Path::new(task.s3_key_project_file)
+    let assignment_dir = std::path::Path::new(&task.s3_key_project_file)
         .parent()
         .unwrap()
         .to_str()
@@ -318,7 +331,7 @@ async fn index(
     // Upload compile_error as a json file to S3
     let resp = client
         .put_object()
-        .bucket(&cfg.bucket_name)
+        .bucket(bucket_name)
         .key(format!("{}/Results/result.json", assignment_dir))
         .body(body)
         .send()
@@ -326,10 +339,7 @@ async fn index(
 
     if let Err(e) = resp {
         println!("Error: {:?}", e);
-        return "Error uploading file to S3";
     }
-
-    "Done!"
 }
 
 #[launch]
@@ -338,15 +348,5 @@ fn rocket() -> _ {
         bucket_name: "uploads-76078f4".into(),
     };
 
-    let aws_config = aws_config::from_env()
-        .region(Region::new("ap-southeast-2"))
-        .load()
-        .now_or_never()
-        .unwrap();
-    let client = Client::new(&aws_config);
-
-    rocket::build()
-        .manage(cfg)
-        .manage(client)
-        .mount("/", routes![index])
+    rocket::build().manage(cfg).mount("/", routes![index])
 }
