@@ -32,7 +32,7 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 
 ####
 
-FROM amazoncorretto:8
+FROM amazoncorretto:17.0.5
 
 WORKDIR /app
 
